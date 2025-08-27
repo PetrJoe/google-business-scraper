@@ -27,9 +27,9 @@ root_logger.setLevel(logging.INFO)
 root_logger.addHandler(string_handler)
 
 # Also log to file
-file_handler = RotatingFileHandler('flask_scraper.log', maxBytes=1000000, backupCount=5)
-file_handler.setFormatter(formatter)
-root_logger.addHandler(file_handler)
+# file_handler = RotatingFileHandler('flask_scraper.log', maxBytes=1000000, backupCount=5)
+# file_handler.setFormatter(formatter)
+# root_logger.addHandler(file_handler)
 
 # Global variables to manage scraping state
 scraping_thread = None
