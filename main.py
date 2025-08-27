@@ -16,6 +16,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 import psutil
 import validators
+import urllib.parse
 
 # Third-party imports
 import playwright
@@ -525,11 +526,53 @@ class EnhancedBusinessScraper:
         
         return R * c
     
+
+    def extract_website(self, page):
+        """Extract website URL with multiple selectors"""
+        selectors = [
+            "a[data-item-id='authority']",
+            "a[href*='http']",
+            "button[data-item-id*='website']",
+            "a[aria-label*='Website']",
+            "a[aria-label*='website']"
+        ]
+        
+        for selector in selectors:
+            try:
+                element = page.query_selector(selector)
+                if element:
+                    href = element.get_attribute("href")
+                    if href and href.startswith('http'):
+                        return href
+            except Exception:
+                continue
+        
+        # Try to extract from the page content as a fallback
+        try:
+            page_content = page.content()
+            website_patterns = [
+                r'https?://[^\s<>"\'{}|\\^`[\]]+',
+                r'www\.[^\s<>"\'{}|\\^`[\]]+'
+            ]
+            
+            for pattern in website_patterns:
+                matches = re.findall(pattern, page_content)
+                for match in matches:
+                    if 'google.com' not in match and 'maps.google.com' not in match:
+                        if not match.startswith('http'):
+                            match = 'https://' + match
+                        return match
+        except Exception:
+            pass
+        
+        return None
+
+    # Update the scrape_google_maps method to fix the scrolling issue
     def scrape_google_maps(self):
         """Enhanced Google Maps scraping using Playwright"""
-        search_url = f"https://www.google.com/maps/search/{self.args.query}"
+        search_url = f"https://www.google.com/maps/search/{urllib.parse.quote(self.args.query)}"
         if self.args.location:
-            search_url += f" in {self.args.location}"
+            search_url += f"+in+{urllib.parse.quote(self.args.location)}"
         
         browser = self.setup_browser()
         context = browser.new_context(
@@ -540,15 +583,14 @@ class EnhancedBusinessScraper:
         
         page.goto(search_url)
         
-        # Wait for results to load
-        page.wait_for_selector(".Nv2PK", timeout=10000)
+        # Wait for results to load with a longer timeout
+        try:
+            page.wait_for_selector(".Nv2PK", timeout=15000)
+        except PlaywrightTimeoutError:
+            logging.warning("Timeout waiting for results to load. Continuing anyway.")
         
         results = []
         processed_names = set()  # Prevent duplicates
-        bad_domains = [
-            "wixsite.com", "weebly.com", "wordpress.com", "blogspot.com",
-            "squarespace.com", "godaddysites.com", "site123.me"
-        ]
         
         with Progress(
             TextColumn("[progress.description]{task.description}"),
@@ -564,11 +606,14 @@ class EnhancedBusinessScraper:
                 stats="Starting..."
             )
             
-            while len(results) < self.args.max_results:
+            scroll_attempts = 0
+            max_scroll_attempts = 10
+            
+            while len(results) < self.args.max_results and scroll_attempts < max_scroll_attempts:
                 try:
                     businesses = page.query_selector_all(".Nv2PK")
                     
-                    for i, biz in enumerate(businesses[len(results):]):
+                    for i, biz in enumerate(businesses):
                         if len(results) >= self.args.max_results:
                             break
                         
@@ -582,7 +627,7 @@ class EnhancedBusinessScraper:
                             name = name_element.text_content().strip() if name_element else "N/A"
                             
                             # Skip if already processed (duplicate)
-                            if name in processed_names:
+                            if name in processed_names or name == "N/A":
                                 continue
                             processed_names.add(name)
                             
@@ -606,35 +651,31 @@ class EnhancedBusinessScraper:
                             confidence_score = 0.0
                             
                             if website:
-                                if any(bad in website for bad in bad_domains):
-                                    status = "Low-quality website"
-                                    confidence_score = 0.2
-                                else:
-                                    status = "Processing website"
-                                    progress.update(scrape_task, stats=f"Processing {name[:20]}...")
+                                status = "Processing website"
+                                progress.update(scrape_task, stats=f"Processing {name[:20]}...")
+                                
+                                try:
+                                    emails, social_media = self.website_crawler.extract_emails_and_social(
+                                        website, max_pages=self.args.max_pages
+                                    )
                                     
-                                    try:
-                                        emails, social_media = self.website_crawler.extract_emails_and_social(
-                                            website, max_pages=self.args.max_pages
-                                        )
+                                    if emails or social_media:
+                                        status = "Data extracted"
+                                        confidence_score = 0.8
+                                    else:
+                                        status = "No contact info found"
+                                        confidence_score = 0.4
                                         
-                                        if emails or social_media:
-                                            status = "Data extracted"
-                                            confidence_score = 0.8
-                                        else:
-                                            status = "No contact info found"
-                                            confidence_score = 0.4
-                                            
-                                        self.stats['websites_processed'] += 1
-                                        if emails:
-                                            self.stats['emails_found'] += len(emails)
-                                        if social_media:
-                                            self.stats['social_found'] += len(social_media)
-                                        
-                                    except Exception as e:
-                                        logging.error(f"Error processing website {website}: {e}")
-                                        status = "Website error"
-                                        confidence_score = 0.1
+                                    self.stats['websites_processed'] += 1
+                                    if emails:
+                                        self.stats['emails_found'] += len(emails)
+                                    if social_media:
+                                        self.stats['social_found'] += len(social_media)
+                                    
+                                except Exception as e:
+                                    logging.error(f"Error processing website {website}: {e}")
+                                    status = "Website error"
+                                    confidence_score = 0.1
                             
                             # Calculate distance if reference coordinates provided
                             distance_km = None
@@ -676,39 +717,31 @@ class EnhancedBusinessScraper:
                     
                     # Scroll to load more results
                     page.evaluate("""
-                        document.querySelector('div.section-scrollbox')?.scrollBy(0,1000)
+                        const scrollContainer = document.querySelector('div.section-scrollbox') || 
+                                            document.querySelector('div.m6QErb') ||
+                                            document.body;
+                        scrollContainer.scrollBy(0, 1000);
                     """)
                     page.wait_for_timeout(random.randint(2000, 4000))
+                    scroll_attempts += 1
                     
                 except Exception as e:
                     logging.error(f"Error in main scraping loop: {e}")
                     break
         
         # Clean up Playwright resources
-        page.close()
-        context.close()
-        browser.close()
-        self.playwright.stop()
+        try:
+            page.close()
+            context.close()
+            browser.close()
+            self.playwright.stop()
+        except Exception:
+            pass
         
         return results
     
-    def extract_website(self, page):
-        """Extract website URL with multiple selectors"""
-        selectors = [
-            "a[data-item-id='authority']",
-            "a[href*='http']",
-            "button[data-item-id*='website']"
-        ]
-        
-        for selector in selectors:
-            try:
-                element = page.query_selector(selector)
-                if element:
-                    return element.get_attribute("href")
-            except Exception:
-                continue
-        return None
-    
+
+
     def extract_address(self, page):
         """Extract address with fallback selectors"""
         selectors = [
