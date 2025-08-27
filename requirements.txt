@@ -1,0 +1,7 @@
+selenium
+validators
+tqdm
+rich
+openpyxl
+psutil
+requests
