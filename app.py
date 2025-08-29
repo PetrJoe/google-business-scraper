@@ -145,11 +145,17 @@ def scraping_status():
         'result_count': len(scraping_results)
     }
     
+    # Add results if available
+    if scraping_results:
+        from main import asdict
+        status_data['results'] = [asdict(result) for result in scraping_results]
+    
     # Add error information if there was an error
     if scraping_error and not is_scraping:
         status_data['error'] = scraping_error
     
     return jsonify(status_data)
+
 
 @app.route('/download_results')
 def download_results():
@@ -206,6 +212,10 @@ def download_results():
         )
     
     return jsonify({'status': 'error', 'message': 'Invalid format'})
+
+
+
+
 
 if __name__ == '__main__':
     # Create templates directory if it doesn't exist
